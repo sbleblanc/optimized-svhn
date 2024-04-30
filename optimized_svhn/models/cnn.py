@@ -3,8 +3,10 @@ from typing import Any, Optional, Tuple
 import torch
 import torch.optim as optim
 import torch.nn as nn
-from torchvision.models import resnet152
+from torchvision.models import resnet152, resnet50
+from torchvision.transforms.v2.functional import to_dtype
 from torchvision.ops import box_convert, box_iou
+from torchvision.utils import draw_bounding_boxes
 from lightning import LightningModule
 from lightning.pytorch.trainer.states import RunningStage
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
@@ -73,14 +75,14 @@ class SVHNModel(LightningModule):
         #     nn.ReLU(),
         #     nn.Dropout(0.05)
         # )
-        self.cnn = resnet152(num_classes=4096)
+        self.cnn = resnet50(num_classes=4096)
         self.lstm = nn.LSTM(4096, 4096, 8, batch_first=True, dropout=0.05, proj_size=16)
         self.bbox_criterion = nn.MSELoss()
         self.num_eos_criterion = nn.CrossEntropyLoss()
 
-        self.lambda_bbox = 0.1
-        self.lambda_num = 2.0
-        self.lambda_eos = 2.0
+        self.lambda_bbox = 1.0
+        self.lambda_num = 1.0
+        self.lambda_eos = 1.0
 
         self.validation_metrics = {
             "loss": [],
@@ -95,7 +97,7 @@ class SVHNModel(LightningModule):
         self.__pause_logging = False
 
     def compute_loss(self, batch, batch_idx) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        imgs, bboxes, lbls, eos = batch
+        imgs, bboxes, lbls, eos, means, stds = batch
         cnn_out = self.cnn(imgs)
         lstm_input = cnn_out.expand(lbls.shape[1], -1, -1).permute((1, 0, 2))
         lstm_output, _ = self.lstm(lstm_input)
@@ -125,28 +127,15 @@ class SVHNModel(LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx) -> STEP_OUTPUT:
-        _, bboxes, lbls, eos = batch
+        imgs, bboxes, lbls, eos, means, stds = batch
         bbox_loss, num_loss, eos_loss, bbox_out, num_out, eos_out = self.compute_loss(batch, batch_idx)
         loss = self.lambda_bbox * bbox_loss + self.lambda_num * num_loss + self.lambda_eos * eos_loss
-        # loss = num_loss
 
         if self.trainer.state.stage != RunningStage.SANITY_CHECKING:
             self.validation_metrics['loss'].append(loss)
             self.validation_metrics['bbox_loss'].append(bbox_loss)
             self.validation_metrics['num_loss'].append(num_loss)
             self.validation_metrics['eos_loss'].append(eos_loss)
-
-            # truth_boxes = box_convert(
-            #     bboxes.reshape(-1, 4),
-            #     in_fmt="xywh",
-            #     out_fmt="xyxy"
-            # )
-            #
-            # pred_boxes = box_convert(
-            #     bbox_out,
-            #     in_fmt="xywh",
-            #     out_fmt="xyxy"
-            # )
 
             ious = box_iou(bbox_out, bboxes.reshape(-1, 4))
             self.validation_metrics['iou'].append(ious.max(dim=1)[0].mean())
@@ -158,6 +147,46 @@ class SVHNModel(LightningModule):
 
             self.validation_metrics['num_acc'].append(num_preds == num_truth)
             self.validation_metrics['eos_acc'].append(eos_preds == eos_truth)
+
+            if batch_idx == 0:
+                pred_scaled_bboxes = bbox_out.detach().clone()
+                pred_scaled_bboxes[:, [0, 2]] *= imgs[0].shape[2]
+                pred_scaled_bboxes[:, [1, 3]] *= imgs[0].shape[1]
+                pred_scaled_bboxes = pred_scaled_bboxes.reshape(bboxes.shape[0], -1, 4)
+                pred_box_count = eos_out.cpu().argmax(dim=-1).reshape(eos.shape[0], -1).argmax(dim=1)
+                pred_lbls = num_out.cpu().argmax(dim=-1).reshape(lbls.shape[0], -1)
+
+                true_scaled_bboxes = bboxes.reshape(-1, 4).detach().clone()
+                true_scaled_bboxes[:, [0, 2]] *= imgs[0].shape[2]
+                true_scaled_bboxes[:, [1, 3]] *= imgs[0].shape[1]
+                true_scaled_bboxes = true_scaled_bboxes.reshape(bboxes.shape[0], -1, 4)
+                expanded_means = means.unsqueeze(-1).unsqueeze(-1)
+                expanded_stds = stds.unsqueeze(-1).unsqueeze(-1)
+                unnorm_imgs = imgs * expanded_stds + expanded_means
+                true_box_count = eos.argmax(dim=1).cpu()
+                for i in range(imgs.shape[0]):
+                    num_true_labels = true_box_count[i] + 1
+                    true_boxes = true_scaled_bboxes[i, :num_true_labels]
+                    true_labels = [str(l.item()) for l in lbls[i, :num_true_labels]]
+                    num_pred_labels = pred_box_count[i] + 1
+                    pred_boxes = pred_scaled_bboxes[i, :num_pred_labels]
+                    pred_labels = [str(l.item()) for l in pred_lbls[i, :num_pred_labels]]
+                    colors = ["blue"] * num_true_labels + ["green"] * num_pred_labels
+                    img_with_box = draw_bounding_boxes(
+                        image=to_dtype(unnorm_imgs[i], torch.uint8, scale=True),
+                        boxes=torch.cat([true_boxes, torch.clamp(pred_boxes, min=0)], dim=0),
+                        labels=true_labels + pred_labels,
+                        colors=colors
+                    )
+                    self.logger.experiment.log_image(
+                        run_id=self.logger.run_id,
+                        image=img_with_box.permute(1, 2, 0).cpu().detach().numpy(),
+                        artifact_file=f"bboxes/epoch_{self.current_epoch}/{i}_{''.join(true_labels)}.png"
+                    )
+
+
+
+
 
         return loss
 

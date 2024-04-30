@@ -11,20 +11,10 @@ from torch.utils.data import Dataset
 from torchvision.utils import draw_bounding_boxes
 from torchvision.io import read_image, ImageReadMode
 from torchvision.tv_tensors import BoundingBoxes, BoundingBoxFormat
-from torchvision.transforms.v2 import Resize, Compose, Normalize, ToDtype
+from torchvision.transforms.v2 import Resize, Compose, Normalize, ToDtype, AutoAugment, AutoAugmentPolicy, RandomCrop, RandomResizedCrop
 import torchvision.transforms.functional as F
 from torchvision.ops import box_convert
 
-
-def show(imgs):
-    if not isinstance(imgs, list):
-        imgs = [imgs]
-    fig, axs = plt.subplots(ncols=len(imgs), squeeze=False)
-    for i, img in enumerate(imgs):
-        img = img.detach()
-        img = F.to_pil_image(img)
-        axs[0, i].imshow(np.asarray(img))
-        axs[0, i].set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
 
 class SVHNDataset(Dataset):
 
@@ -57,6 +47,8 @@ class SVHNDataset(Dataset):
             eos[-1] = 1
             self.oes.append(eos)
 
+        self.augment = AutoAugment(AutoAugmentPolicy.SVHN)
+
         self.bboxes = [
             BoundingBoxes(
                 [
@@ -83,13 +75,13 @@ class SVHNDataset(Dataset):
             b[:, [0, 2]] /= 120.0
             b[:, [1, 3]] /= 60.0
 
-        means = [img.mean(dim=[1, 2]) for img in self.imgs]
-        stds = [img.std(dim=[1, 2]) for img in self.imgs]
+        self.means = [img.mean(dim=[1, 2]) for img in self.imgs]
+        self.stds = [img.std(dim=[1, 2]) for img in self.imgs]
 
         self.imgs = [
             Normalize(mean=m, std=s)(img)
             for img, m, s in tqdm(
-                zip(self.imgs, means, stds),
+                zip(self.imgs, self.means, self.stds),
                 total=len(self.imgs),
                 desc="Normalizing images",
                 unit="imgs"
@@ -97,7 +89,7 @@ class SVHNDataset(Dataset):
         ]
 
     def __getitem__(self, item):
-        return self.imgs[item], self.bboxes[item], self.labels[item], self.oes[item]
+        return self.imgs[item], self.bboxes[item], self.labels[item], self.oes[item], self.means[item], self.stds[item]
 
     def __len__(self):
         return len(self.imgs)
@@ -107,7 +99,9 @@ class SVHNDataset(Dataset):
         batched_bboxes = pad_sequence([b[1] for b in batch], batch_first=True, padding_value=self._bbox_pad_value)
         batched_lbls = pad_sequence([b[2] for b in batch], batch_first=True, padding_value=self._label_pad_value)
         batched_eos = pad_sequence([b[3] for b in batch], batch_first=True, padding_value=self._eos_pad_value)
+        batched_means = torch.stack([b[4] for b in batch])
+        batched_stds = torch.stack([b[5] for b in batch])
 
-        return batched_imgs, batched_bboxes, batched_lbls, batched_eos
+        return batched_imgs, batched_bboxes, batched_lbls, batched_eos, batched_means, batched_stds
 
 
