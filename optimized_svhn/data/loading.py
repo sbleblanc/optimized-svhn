@@ -11,18 +11,34 @@ from torch.utils.data import Dataset
 from torchvision.utils import draw_bounding_boxes
 from torchvision.io import read_image, ImageReadMode
 from torchvision.tv_tensors import BoundingBoxes, BoundingBoxFormat
-from torchvision.transforms.v2 import Resize, Compose, Normalize, ToDtype, AutoAugment, AutoAugmentPolicy, RandomCrop, RandomResizedCrop
+from torchvision.transforms.v2 import Resize, Compose, Normalize, ToDtype, RandomAffine, ColorJitter, RandomApply, GaussianBlur, RandomPerspective
 import torchvision.transforms.functional as F
 from torchvision.ops import box_convert
 
 
 class SVHNDataset(Dataset):
 
-    def __init__(self, folder_path: Path):
+    def __init__(
+            self,
+            folder_path: Path,
+            img_size: Tuple[int, int],
+            cj_brightness: float,
+            cj_contrast: float,
+            cj_saturation: float,
+            aff_deg: Tuple[int, int],
+            aff_trans: Tuple[float, float],
+            aff_scale: Tuple[float, float],
+            aff_shear: float,
+            blur_kernel: int,
+            blur_sigma: Tuple[float, float],
+            perspective_dist: float,
+            augment_prob: float,
+    ):
         super().__init__()
         self._bbox_pad_value = 0.0
         self._eos_pad_value = -100
         self._label_pad_value = -100
+        self.augment = True
 
         self.imgs = [
             read_image(str(p))
@@ -47,8 +63,6 @@ class SVHNDataset(Dataset):
             eos[-1] = 1
             self.oes.append(eos)
 
-        self.augment = AutoAugment(AutoAugmentPolicy.SVHN)
-
         self.bboxes = [
             BoundingBoxes(
                 [
@@ -62,7 +76,7 @@ class SVHNDataset(Dataset):
         ]
 
         preprocess_transforms = Compose([
-            Resize(size=(60, 120)),
+            Resize(size=img_size),
             ToDtype(torch.float32, scale=True)
         ])
 
@@ -71,25 +85,28 @@ class SVHNDataset(Dataset):
             for img, bbox in tqdm(zip(self.imgs, self.bboxes), desc="Preprossessing imgs and bboxes")
         ])
 
-        for b in self.bboxes:
-            b[:, [0, 2]] /= 120.0
-            b[:, [1, 3]] /= 60.0
-
-        self.means = [img.mean(dim=[1, 2]) for img in self.imgs]
-        self.stds = [img.std(dim=[1, 2]) for img in self.imgs]
-
-        self.imgs = [
-            Normalize(mean=m, std=s)(img)
-            for img, m, s in tqdm(
-                zip(self.imgs, self.means, self.stds),
-                total=len(self.imgs),
-                desc="Normalizing images",
-                unit="imgs"
-            )
-        ]
+        self.augmentation_transforms = Compose([
+            RandomPerspective(perspective_dist, augment_prob),
+            RandomApply([ColorJitter(brightness=cj_brightness, contrast=cj_contrast, saturation=cj_saturation)], augment_prob),
+            RandomApply([RandomAffine(degrees=aff_deg, translate=aff_trans, scale=aff_scale, shear=aff_shear)], augment_prob),
+            RandomApply([GaussianBlur(blur_kernel, sigma=blur_sigma)], augment_prob),
+        ])
 
     def __getitem__(self, item):
-        return self.imgs[item], self.bboxes[item], self.labels[item], self.oes[item], self.means[item], self.stds[item]
+
+        if self.augment:
+            img, bboxes = self.augmentation_transforms(self.imgs[item], self.bboxes[item])
+        else:
+            img = self.imgs[item]
+            bboxes = self.bboxes[item]
+        per_channel_means = img.mean(dim=[1, 2])
+        per_channel_stds = img.std(dim=[1, 2])
+        img = Normalize(mean=per_channel_means, std=per_channel_stds)(img)
+        normalized_bboxes = bboxes.clone()
+        normalized_bboxes[:, [0, 2]] /= img.shape[2]
+        normalized_bboxes[:, [1, 3]] /= img.shape[1]
+
+        return img, normalized_bboxes, self.labels[item], self.oes[item], per_channel_means, per_channel_stds
 
     def __len__(self):
         return len(self.imgs)
