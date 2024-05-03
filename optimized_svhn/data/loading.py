@@ -32,7 +32,7 @@ class SVHNDataset(Dataset):
             blur_kernel: int,
             blur_sigma: Tuple[float, float],
             perspective_dist: float,
-            augment_prob: float,
+            augment_prob: float
     ):
         super().__init__()
         self._bbox_pad_value = 0.0
@@ -96,16 +96,16 @@ class SVHNDataset(Dataset):
 
         if self.augment:
             img, bboxes = self.augmentation_transforms(self.imgs[item], self.bboxes[item])
-            bboxes = bboxes[torch.randperm(bboxes.shape[0])]
+            # bboxes = bboxes[torch.randperm(bboxes.shape[0])]
         else:
             img = self.imgs[item]
             bboxes = self.bboxes[item]
-        per_channel_means = img.mean(dim=[1, 2])
-        per_channel_stds = img.std(dim=[1, 2])
-        img = Normalize(mean=per_channel_means, std=per_channel_stds)(img)
+        # per_channel_means = img.mean(dim=[1, 2])
+        # per_channel_stds = img.std(dim=[1, 2])
+        # img = Normalize(mean=per_channel_means, std=per_channel_stds)(img)
         normalized_center = (bboxes[:, :2] + (bboxes[:, 2:4] / 2)) / torch.tensor([[img.shape[2], img.shape[1]]])
 
-        return img, normalized_center, self.labels[item], self.oes[item], per_channel_means, per_channel_stds
+        return img, normalized_center, self.labels[item], self.oes[item] #, per_channel_means, per_channel_stds
 
     def __len__(self):
         return len(self.imgs)

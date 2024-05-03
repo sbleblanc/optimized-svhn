@@ -1,9 +1,12 @@
 import json
 import click
+import torch
 from tqdm import tqdm
 from typing import Tuple
 from glob import glob
 from pathlib import Path
+import matplotlib
+from matplotlib import pyplot as plt
 
 import mat73
 from mlflow.entities import Param
@@ -16,7 +19,8 @@ from optimized_svhn.utils.img import get_avg_img_size
 from optimized_svhn.data.loading import SVHNDataset
 from optimized_svhn.utils.general import convert_to_list
 from optimized_svhn.models.cnn import SVHNModel
-
+from torchvision.utils import draw_bounding_boxes
+from torchvision.transforms.v2.functional import to_dtype
 
 @click.group()
 def cli():
@@ -54,6 +58,7 @@ def cli():
 @click.option("--gradient-clip", type=click.FLOAT, default=1.0)
 @click.option("--precision", type=click.STRING, default="16-mixed")
 @click.option("--cnn-out-dropout", type=click.FLOAT, default=0.5)
+@click.option("--max-length", type=click.INT, default=6)
 def train_model(
         train_set_folder: Path,
         bbox_lambda: float,
@@ -84,7 +89,8 @@ def train_model(
         learning_rate: float,
         gradient_clip: float,
         precision: str,
-        cnn_out_dropout: float
+        cnn_out_dropout: float,
+        max_length: int
 ):
     seed_everything(seed, workers=True)
 
@@ -152,9 +158,9 @@ def train_model(
         ),
         EarlyStopping(
             "val_loss",
-            min_delta=1e-2,
+            min_delta=1e-4,
             verbose=True,
-            patience=5
+            patience=10
         )
     ]
 
@@ -173,6 +179,7 @@ def train_model(
         perspective_dist,
         augment_prob
     )
+
     train_ds, valid_ds = random_split(ds, [train_split, 1 - train_split])
     valid_ds.dataset.augment = False
     model = SVHNModel(
@@ -185,7 +192,8 @@ def train_model(
         lstm_hidden_dim,
         lstm_dropout,
         learning_rate,
-        cnn_out_dropout
+        cnn_out_dropout,
+        max_length
     )
 
     trainer = Trainer(
@@ -198,8 +206,8 @@ def train_model(
     )
     trainer.fit(
         model,
-        DataLoader(train_ds, batch_size=batch_size, collate_fn=ds.collate_fn, shuffle=True),
-        DataLoader(valid_ds, batch_size=batch_size, collate_fn=ds.collate_fn, shuffle=False)
+        DataLoader(train_ds, batch_size=batch_size, collate_fn=ds.collate_fn, num_workers=11, shuffle=True),
+        DataLoader(valid_ds, batch_size=batch_size, collate_fn=ds.collate_fn, num_workers=11, shuffle=False)
     )
 
 

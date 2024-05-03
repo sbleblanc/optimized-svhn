@@ -25,11 +25,12 @@ class SVHNModel(LightningModule):
             lstm_hidden_dim: int,
             lstm_dropout: float,
             learning_rate: float,
-            cnn_out_dropout: float
+            cnn_out_dropout: float,
+            max_length: int
     ):
         super().__init__()
 
-        self.cnn = get_model(cnn_model, num_classes=cnn_out_dim)
+        self.cnn = get_model(cnn_model, num_classes=cnn_out_dim * max_length)
         self.cnn_dropout = nn.Dropout(p=cnn_out_dropout)
         self.lstm = nn.LSTM(cnn_out_dim, lstm_hidden_dim, num_lstm_layers, batch_first=True, dropout=lstm_dropout, proj_size=3)
         self.bbox_criterion = nn.MSELoss()
@@ -41,6 +42,7 @@ class SVHNModel(LightningModule):
         self.lambda_num = lbl_lambda
         self.lambda_eos = eos_lambda
         self.learning_rate = learning_rate
+        self.max_length = max_length
 
         # self.validation_metrics = {
         #     "loss": [],
@@ -57,24 +59,25 @@ class SVHNModel(LightningModule):
     def compute_loss(self, batch, batch_idx) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         imgs, bboxes, lbls, eos, means, stds = batch
         cnn_out = self.cnn_dropout(self.cnn(imgs))
-        lstm_input = cnn_out.expand(lbls.shape[1], -1, -1).permute((1, 0, 2))
+        # lstm_input = cnn_out.expand(lbls.shape[1], -1, -1).permute((1, 0, 2))
+        lstm_input = cnn_out.reshape(imgs.shape[0], self.max_length, -1)[:, :bboxes.shape[1]]
         lstm_output, _ = self.lstm(lstm_input)
 
-        num_pred_coord = (torch.sigmoid(lstm_output[:, :, -1]) > 0.5).long().argmax(-1) + 1
-        pred_coord = torch.cat([
-            lstm_output[i, :n, :2].reshape(-1, 2)
-            for i, n in enumerate(num_pred_coord)
-        ])
-        truth_coord = torch.cat([
-            bboxes[i, :n].reshape(-1, 2)
-            for i, n in enumerate(num_pred_coord)
-        ])
+        # num_pred_coord = (torch.sigmoid(lstm_output[:, :, -1]) > 0.5).long().argmax(-1) + 1
+        # pred_coord = torch.cat([
+        #     lstm_output[i, :n, :2].reshape(-1, 2)
+        #     for i, n in enumerate(num_pred_coord)
+        # ])
+        # truth_coord = torch.cat([
+        #     bboxes[i, :n].reshape(-1, 2)
+        #     for i, n in enumerate(num_pred_coord)
+        # ])
 
         lstm_output = lstm_output.reshape(-1, 3)
         coord_out = lstm_output[:, :2]
         eos_out = lstm_output[:, 2:3]
 
-        coord_loss = self.bbox_criterion(pred_coord, truth_coord)
+        coord_loss = self.bbox_criterion(coord_out, bboxes.reshape(-1, 2))
         eos_loss = self.eos_criterion(eos_out, eos.reshape(-1, 1))
 
         return coord_loss, eos_loss, coord_out, eos_out
