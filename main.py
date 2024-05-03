@@ -137,14 +137,14 @@ def train_model(
             mode="min",
             auto_insert_metric_name=True
         ),
-        ModelCheckpoint(
-            f"models/{mlflow_logger.run_id}",
-            save_top_k=1,
-            filename="best_num_acc",
-            monitor="val_num_acc",
-            mode="max",
-            auto_insert_metric_name=True
-        ),
+        # ModelCheckpoint(
+        #     f"models/{mlflow_logger.run_id}",
+        #     save_top_k=1,
+        #     filename="best_num_acc",
+        #     monitor="val_num_acc",
+        #     mode="max",
+        #     auto_insert_metric_name=True
+        # ),
         ModelCheckpoint(
             f"models/{mlflow_logger.run_id}",
             filename="latest_epoch",
@@ -153,7 +153,8 @@ def train_model(
         EarlyStopping(
             "val_loss",
             min_delta=1e-2,
-            verbose=True
+            verbose=True,
+            patience=5
         )
     ]
 
@@ -228,8 +229,6 @@ def convert_mat_file_to_json(mat_path: Path):
 
     with (mat_path.parent / f"{mat_path.stem}.json").open('w') as f:
         json.dump(bbox_data, f)
-
-
 
 
 @cli.command()
