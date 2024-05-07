@@ -66,10 +66,11 @@ class SVHNDataset(Dataset):
         self.bboxes = [
             BoundingBoxes(
                 [
+                    # box_convert(torch.tensor(bbox_lbl['bbox']), in_fmt="xywh", out_fmt="xyxy").tolist()
                     bbox_lbl['bbox']
                     for bbox_lbl in bbox_lbl_items
                 ],
-                format=BoundingBoxFormat.XYXY,
+                format=BoundingBoxFormat.XYWH,
                 canvas_size=img.shape[-2:]
             )
             for bbox_lbl_items, img in tqdm(zip(bbox_label_data, self.imgs), desc="Loading bboxes")
@@ -89,7 +90,7 @@ class SVHNDataset(Dataset):
             RandomPerspective(perspective_dist, augment_prob),
             RandomApply([ColorJitter(brightness=cj_brightness, contrast=cj_contrast, saturation=cj_saturation)], augment_prob),
             RandomApply([RandomAffine(degrees=aff_deg, translate=aff_trans, scale=aff_scale, shear=aff_shear)], augment_prob),
-            RandomApply([GaussianBlur(blur_kernel, sigma=blur_sigma)], augment_prob),
+            # RandomApply([GaussianBlur(blur_kernel, sigma=blur_sigma)], augment_prob),
         ])
 
     def __getitem__(self, item):
@@ -100,12 +101,13 @@ class SVHNDataset(Dataset):
         else:
             img = self.imgs[item]
             bboxes = self.bboxes[item]
-        # per_channel_means = img.mean(dim=[1, 2])
-        # per_channel_stds = img.std(dim=[1, 2])
-        # img = Normalize(mean=per_channel_means, std=per_channel_stds)(img)
-        normalized_center = (bboxes[:, :2] + (bboxes[:, 2:4] / 2)) / torch.tensor([[img.shape[2], img.shape[1]]])
+        per_channel_means = img.mean(dim=[1, 2])
+        per_channel_stds = img.std(dim=[1, 2])
+        img = Normalize(mean=per_channel_means, std=per_channel_stds)(img)
+        normalized_bboxes = bboxes / torch.tensor([[img.shape[2], img.shape[1]]*2])
+        # normalized_center = (bboxes[:, :2] + (bboxes[:, 2:4] / 2)) / torch.tensor([[img.shape[2], img.shape[1]]])
 
-        return img, normalized_center, self.labels[item], self.oes[item] #, per_channel_means, per_channel_stds
+        return img, normalized_bboxes, self.labels[item], self.oes[item], per_channel_means, per_channel_stds
 
     def __len__(self):
         return len(self.imgs)

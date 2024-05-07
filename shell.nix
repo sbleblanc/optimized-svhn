@@ -24,5 +24,6 @@ pkgs.mkShell {
     pkgs.ninja
     pkgs.gobject-introspection
     pkgs.cmake
+    pkgs.tk
   ];
 }

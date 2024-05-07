@@ -10,6 +10,7 @@ from torchvision.utils import draw_bounding_boxes, draw_keypoints
 from lightning import LightningModule
 from lightning.pytorch.trainer.states import RunningStage
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
+from torchvision.ops import box_convert
 
 
 class SVHNModel(LightningModule):
@@ -32,10 +33,10 @@ class SVHNModel(LightningModule):
 
         self.cnn = get_model(cnn_model, num_classes=cnn_out_dim * max_length)
         self.cnn_dropout = nn.Dropout(p=cnn_out_dropout)
-        self.lstm = nn.LSTM(cnn_out_dim, lstm_hidden_dim, num_lstm_layers, batch_first=True, dropout=lstm_dropout, proj_size=3)
+        self.lstm = nn.LSTM(cnn_out_dim, lstm_hidden_dim, num_lstm_layers, batch_first=True, dropout=lstm_dropout, proj_size=15)
         self.bbox_criterion = nn.MSELoss()
         self.inverse_criterion = nn.MSELoss()
-        self.num_eos_criterion = nn.CrossEntropyLoss()
+        self.num_criterion = nn.CrossEntropyLoss()
         self.eos_criterion = nn.BCEWithLogitsLoss()
 
         self.lambda_bbox = bbox_lambda
@@ -56,7 +57,7 @@ class SVHNModel(LightningModule):
 
         self.__pause_logging = False
 
-    def compute_loss(self, batch, batch_idx) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def compute_loss(self, batch, batch_idx) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         imgs, bboxes, lbls, eos, means, stds = batch
         cnn_out = self.cnn_dropout(self.cnn(imgs))
         # lstm_input = cnn_out.expand(lbls.shape[1], -1, -1).permute((1, 0, 2))
@@ -73,22 +74,25 @@ class SVHNModel(LightningModule):
         #     for i, n in enumerate(num_pred_coord)
         # ])
 
-        lstm_output = lstm_output.reshape(-1, 3)
-        coord_out = lstm_output[:, :2]
-        eos_out = lstm_output[:, 2:3]
+        lstm_output = lstm_output.reshape(-1, 15)
+        coord_out = lstm_output[:, :4]
+        lbl_out = lstm_output[:, 4:14]
+        eos_out = lstm_output[:, 14:15]
 
-        coord_loss = self.bbox_criterion(coord_out, bboxes.reshape(-1, 2))
+        coord_loss = self.bbox_criterion(coord_out, bboxes.reshape(-1, 4))
+        lbl_loss = self.num_criterion(lbl_out, lbls.reshape(-1, 1).squeeze())
         eos_loss = self.eos_criterion(eos_out, eos.reshape(-1, 1))
 
-        return coord_loss, eos_loss, coord_out, eos_out
+        return coord_loss, eos_loss, lbl_loss, coord_out, lbl_out, eos_out
 
     def training_step(self, batch, batch_idx) -> STEP_OUTPUT:
-        coord_loss, eos_loss, _, _ = self.compute_loss(batch, batch_idx)
-        loss = self.lambda_bbox * coord_loss + self.lambda_eos * eos_loss
+        coord_loss, lbl_loss, eos_loss, _, _, _ = self.compute_loss(batch, batch_idx)
+        loss = self.lambda_bbox * coord_loss + self.lambda_num * lbl_loss + self.lambda_eos * eos_loss
 
         self.log_dict(
             {
                 "loss": loss,
+                "lbl_loss": lbl_loss,
                 "coord_loss": coord_loss,
                 "eos_loss": eos_loss,
             },
@@ -101,8 +105,8 @@ class SVHNModel(LightningModule):
 
     def validation_step(self, batch, batch_idx) -> STEP_OUTPUT:
         imgs, bboxes, lbls, eos, means, stds = batch
-        coord_loss, eos_loss, coord_out, eos_out = self.compute_loss(batch, batch_idx)
-        loss = self.lambda_bbox * coord_loss + self.lambda_eos * eos_loss
+        coord_loss, lbl_loss, eos_loss, coord_out, lbl_out, eos_out = self.compute_loss(batch, batch_idx)
+        loss = self.lambda_bbox * coord_loss + self.lambda_num * lbl_loss + self.lambda_eos * eos_loss
 
         if self.trainer.state.stage != RunningStage.SANITY_CHECKING:
 
@@ -112,6 +116,7 @@ class SVHNModel(LightningModule):
             self.log_dict(
                 {
                     "val_loss": loss,
+                    "val_lbl_loss": lbl_loss,
                     "val_coord_loss": coord_loss,
                     "val_eos_loss": eos_loss,
                     "val_eos_acc": (eos_preds == eos_truth).float().mean()
@@ -123,29 +128,56 @@ class SVHNModel(LightningModule):
 
         if batch_idx == 0:
             pred_scaled_coord = coord_out.detach().cpu()
-            pred_scaled_coord = pred_scaled_coord * torch.tensor([[imgs[0].shape[2], imgs[0].shape[1]]])
-            pred_scaled_coord = pred_scaled_coord.reshape(bboxes.shape[0], -1, 2)
+            pred_scaled_coord = pred_scaled_coord * torch.tensor([[imgs[0].shape[2], imgs[0].shape[1]] * 2])
+            pred_scaled_coord = pred_scaled_coord.reshape(bboxes.shape[0], -1, 4)
             pred_coord_count = (torch.sigmoid(eos_out.detach().cpu().reshape(eos.shape[0], -1)) > 0.5).long().argmax(dim=-1) + 1
 
-            true_scaled_coord = bboxes.reshape(-1, 2).detach().cpu()
-            true_scaled_coord = true_scaled_coord * torch.tensor([[imgs[0].shape[2], imgs[0].shape[1]]])
-            true_scaled_coord = true_scaled_coord.reshape(bboxes.shape[0], -1, 2)
+            true_scaled_coord = bboxes.reshape(-1, 4).detach().cpu()
+            true_scaled_coord = true_scaled_coord * torch.tensor([[imgs[0].shape[2], imgs[0].shape[1]] * 2])
+            true_scaled_coord = true_scaled_coord.reshape(bboxes.shape[0], -1, 4)
             true_coord_count = eos.argmax(dim=1).cpu() + 1
 
             expanded_means = means.unsqueeze(-1).unsqueeze(-1)
             expanded_stds = stds.unsqueeze(-1).unsqueeze(-1)
             unnorm_imgs = imgs * expanded_stds + expanded_means
+            pred_lbls = lbl_out.cpu().argmax(dim=-1).reshape(lbls.shape[0], -1)
 
             for i in range(imgs.shape[0]):
-                pred_coord = pred_scaled_coord[i, :pred_coord_count[i]].unsqueeze(1)
-                true_coord = true_scaled_coord[i, :true_coord_count[i]].unsqueeze(1)
-                img_with_key = draw_keypoints(to_dtype(unnorm_imgs[i], torch.uint8, scale=True), true_coord, colors="blue")
-                img_with_key = draw_keypoints(to_dtype(img_with_key, torch.uint8, scale=True), pred_coord, colors="red")
-                self.logger.experiment.log_image(
-                    run_id=self.logger.run_id,
-                    image=img_with_key.permute(1, 2, 0).cpu().detach().numpy(),
-                    artifact_file=f"bboxes/epoch_{self.current_epoch}/{i}.png"
-                )
+                # pred_coord = pred_scaled_coord[i, :pred_coord_count[i]].unsqueeze(1)
+                # true_coord = true_scaled_coord[i, :true_coord_count[i]].unsqueeze(1)
+
+                true_labels = [str(l.item()) for l in lbls[i, :true_coord_count[i]]]
+                pred_labels = [str(l.item()) for l in pred_lbls[i, :pred_coord_count[i]]]
+                colors = ["blue"] * true_coord_count[i] + ["green"] * pred_coord_count[i]
+
+                try:
+                    img_with_box = draw_bounding_boxes(
+                        image=to_dtype(unnorm_imgs[i], torch.uint8, scale=True),
+                        boxes=torch.cat(
+                            [
+                                box_convert(true_scaled_coord[i, :true_coord_count[i]], in_fmt="xywh", out_fmt="xyxy"),
+                                box_convert(torch.clamp(pred_scaled_coord[i, :pred_coord_count[i]], min=0), in_fmt="xywh", out_fmt="xyxy")
+                            ],
+                            dim=0
+                        ),
+                        labels=true_labels + pred_labels,
+                        colors=colors
+                    )
+                    self.logger.experiment.log_image(
+                        run_id=self.logger.run_id,
+                        image=img_with_box.permute(1, 2, 0).cpu().detach().numpy(),
+                        artifact_file=f"bboxes/epoch_{self.current_epoch}/{i}_{''.join(true_labels)}.png"
+                    )
+                except:
+                    print(pred_scaled_coord[i])
+
+                # img_with_key = draw_keypoints(to_dtype(unnorm_imgs[i], torch.uint8, scale=True), true_coord, colors="blue")
+                # img_with_key = draw_keypoints(to_dtype(img_with_key, torch.uint8, scale=True), pred_coord, colors="red")
+                # self.logger.experiment.log_image(
+                #     run_id=self.logger.run_id,
+                #     image=img_with_key.permute(1, 2, 0).cpu().detach().numpy(),
+                #     artifact_file=f"bboxes/epoch_{self.current_epoch}/{i}.png"
+                # )
 
                 # pred_scaled_bboxes = bbox_out.detach().clone()
                 # pred_scaled_bboxes[:, [0, 2]] *= imgs[0].shape[2]

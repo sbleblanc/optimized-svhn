@@ -1,12 +1,16 @@
 import json
 import click
+import numpy as np
 import torch
+import re
 from tqdm import tqdm
 from typing import Tuple
 from glob import glob
 from pathlib import Path
 import matplotlib
 from matplotlib import pyplot as plt
+import seaborn as sns
+from torchvision.io import read_image
 
 import mat73
 from mlflow.entities import Param
@@ -46,13 +50,13 @@ def cli():
 @click.option("--cj-brightness", type=click.FLOAT, default=0.5)
 @click.option("--cj-contrast", type=click.FLOAT, default=0.5)
 @click.option("--cj-saturation", type=click.FLOAT, default=0.5)
-@click.option("--aff-deg", type=click.Tuple([click.INT, click.INT]), default=(-60, 60), nargs=2)
-@click.option("--aff-trans", type=click.Tuple([click.FLOAT, click.FLOAT]), default=(0.5, 0.5), nargs=2)
-@click.option("--aff-scale", type=click.Tuple([click.FLOAT, click.FLOAT]), default=(0.1, 3.0), nargs=2)
-@click.option("--aff-shear", type=click.FLOAT, default=60)
+@click.option("--aff-deg", type=click.Tuple([click.INT, click.INT]), default=(-45, 45), nargs=2)
+@click.option("--aff-trans", type=click.Tuple([click.FLOAT, click.FLOAT]), default=(0.3, 0.1), nargs=2)
+@click.option("--aff-scale", type=click.Tuple([click.FLOAT, click.FLOAT]), default=(0.75, 1.5), nargs=2)
+@click.option("--aff-shear", type=click.FLOAT, default=45)
 @click.option("--blur-kernel", type=click.INT, default=5)
 @click.option("--blur-sigma", type=click.Tuple([click.FLOAT, click.FLOAT]), default=(0.1, 1.5), nargs=2)
-@click.option("--perspective-dist", type=click.FLOAT, default=0.7)
+@click.option("--perspective-dist", type=click.FLOAT, default=0.5)
 @click.option("--augment-prob", type=click.FLOAT, default=0.4)
 @click.option("--learning-rate", type=click.FLOAT, default=1e-4)
 @click.option("--gradient-clip", type=click.FLOAT, default=1.0)
@@ -156,12 +160,12 @@ def train_model(
             filename="latest_epoch",
             every_n_epochs=1
         ),
-        EarlyStopping(
-            "val_loss",
-            min_delta=1e-4,
-            verbose=True,
-            patience=10
-        )
+        # EarlyStopping(
+        #     "val_loss",
+        #     min_delta=1e-4,
+        #     verbose=True,
+        #     patience=5
+        # )
     ]
 
     ds = SVHNDataset(
@@ -203,11 +207,12 @@ def train_model(
         logger=mlflow_logger,
         callbacks=model_callbacks,
         log_every_n_steps=200,
+        max_epochs=100
     )
     trainer.fit(
         model,
-        DataLoader(train_ds, batch_size=batch_size, collate_fn=ds.collate_fn, num_workers=11, shuffle=True),
-        DataLoader(valid_ds, batch_size=batch_size, collate_fn=ds.collate_fn, num_workers=11, shuffle=False)
+        DataLoader(train_ds, batch_size=batch_size, collate_fn=ds.collate_fn, shuffle=True),
+        DataLoader(valid_ds, batch_size=batch_size, collate_fn=ds.collate_fn, shuffle=False)
     )
 
 
@@ -250,6 +255,46 @@ def avg_img_sizes(image_paths: Tuple[str, ...]):
     avg_h, avg_w = get_avg_img_size(complete_paths, ImageReadMode.GRAY)
     print(f"Average height: {avg_h}")
     print(f"Average width: {avg_w}")
+
+
+
+@cli.command()
+@click.argument("img-dir-path", type=click.Path(dir_okay=True, file_okay=False, path_type=Path))
+def plot_pos_dist(img_dir_path: Path):
+    matplotlib.use("Gtk4Agg")
+    imgs = [
+        read_image(str(p))
+        for p in tqdm(
+            sorted(img_dir_path.glob("*.png"), key=lambda s: float(re.search(r"\d+", str(s))[0])),
+            desc="Loading images",
+            unit="files"
+        )
+    ]
+
+    with (img_dir_path / "digitStruct.json").open() as f:
+        bbox_data = json.load(f)
+
+
+
+    xs = []
+    ys = []
+    for img, bbox_lbls in zip(imgs, bbox_data):
+        all_x = np.array([bbox_lbl['bbox'][0] / img.shape[2] for bbox_lbl in bbox_lbls])
+        xs.append((all_x.max() - all_x.min())/2)
+        all_y = np.array([bbox_lbl['bbox'][1] / img.shape[1] for bbox_lbl in bbox_lbls])
+        ys.append((all_y.max() - all_y.min()) / 2)
+        # xs.extend((bbox_lbl['bbox'][0] / img.shape[2] for bbox_lbl in bbox_lbls))
+        # ys.extend((bbox_lbl['bbox'][0] / img.shape[2] for bbox_lbl in bbox_lbls))
+
+    xs = np.array(xs)
+    ys = np.array(ys)
+
+    sns.histplot(xs)
+    plt.show()
+
+    sns.histplot(ys)
+    plt.show()
+
 
 
 if __name__ == "__main__":
